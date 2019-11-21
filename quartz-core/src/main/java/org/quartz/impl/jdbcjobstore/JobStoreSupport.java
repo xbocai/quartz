@@ -348,7 +348,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         this.maxToRecoverAtATime = maxToRecoverAtATime;
     }
 
-    /**
+    /**o
      * @return Returns the dbRetryInterval.
      */
     public long getDbRetryInterval() {
@@ -800,7 +800,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
 
         // Set any connection connection attributes we are to override.
         try {
-            if (!isDontSetAutoCommitFalse()) {
+            if (!isDontSetAutoCommitFalse()) {//dontSetAutoCommitFalse参数,default=false
                 conn.setAutoCommit(false);
             }
 
@@ -871,6 +871,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
             recoverMisfiredJobs(conn, true);
             
             // recover jobs marked for recovery that were not fully executed
+            //SELECT * FROM {0}FIRED_TRIGGERS WHERE SCHED_NAME = {1} AND INSTANCE_NAME = ? AND REQUESTS_RECOVERY = TRUE
             List<OperableTrigger> recoveringJobTriggers = getDelegate()
                     .selectTriggersForRecoveringJobs(conn);
             getLog()
@@ -959,6 +960,10 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         long earliestNewTime = Long.MAX_VALUE;
         // We must still look for the MISFIRED state in case triggers were left 
         // in this state when upgrading to this version that does not support it. 
+        //SELECT TRIGGER_NAME, TRIGGER_GROUP FROM {0}TRIGGERS 
+        //WHERE SCHED_NAME = {1} AND NOT (MISFIRE_INSTR = -1)
+        //AND NEXT_FIRE_TIME < ? AND TRIGGER_STATE = ? ORDER BY NEXT_FIRE_TIME ASC, PRIORITY DESC
+        //获取到的数据放到misfiredTriggers中
         boolean hasMoreMisfiredTriggers =
             getDelegate().hasMisfiredTriggersInState(
                 conn, STATE_WAITING, getMisfireTime(), 
@@ -980,7 +985,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         }
 
         for (TriggerKey triggerKey: misfiredTriggers) {
-            
+            //根据Trigger类型获取到具体的Trigger信息
             OperableTrigger trig = 
                 retrieveTrigger(conn, triggerKey);
 
@@ -2789,6 +2794,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
      * 
      * @see #releaseAcquiredTrigger(OperableTrigger)
      */
+    // now + idleWaitTime, Math.min(availThreadCount, qsRsrcs.getMaxBatchSize()), qsRsrcs.getBatchTimeWindow()
     @SuppressWarnings("unchecked")
     public List<OperableTrigger> acquireNextTriggers(final long noLaterThan, final int maxCount, final long timeWindow)
         throws JobPersistenceException {
@@ -2841,6 +2847,14 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         do {
             currentLoopCount ++;
             try {
+                /**
+                 * SELECT * FROM TRIGGERS
+                 *   WHERE SCHED_NAME = {1} AND TRIGGER_STATE = WAITING AND NEXT_FIRE_TIME <= noLaterThan + timeWindow
+                 *   AND (MISFIRE_INSTR = -1 OR (MISFIRE_INSTR != -1 AND NEXT_FIRE_TIME >= getMisfireTime))
+                 *   ORDER BY NEXT_FIRE_TIME ASC, PRIORITY DESC
+                 */
+                //State=STATE_WAITING
+                //MisfireTime=now-misfireThreshold
                 List<TriggerKey> keys = getDelegate().selectTriggerToAcquire(conn, noLaterThan + timeWindow, getMisfireTime(), maxCount);
                 
                 // No trigger is ready to fire yet.
@@ -2851,11 +2865,12 @@ public abstract class JobStoreSupport implements JobStore, Constants {
 
                 for(TriggerKey triggerKey: keys) {
                     // If our trigger is no longer available, try a new one.
+                    //根据类型从具体表中获取trigger信息，并构建出Trigger对象
                     OperableTrigger nextTrigger = retrieveTrigger(conn, triggerKey);
                     if(nextTrigger == null) {
                         continue; // next trigger
                     }
-                    
+
                     // If trigger's job is set as @DisallowConcurrentExecution, and it has already been added to result, then
                     // put it back into the timeTriggers set and continue to search for next trigger.
                     JobKey jobKey = nextTrigger.getJobKey();
@@ -2865,13 +2880,14 @@ public abstract class JobStoreSupport implements JobStore, Constants {
                     } catch (JobPersistenceException jpe) {
                         try {
                             getLog().error("Error retrieving job, setting trigger state to ERROR.", jpe);
+                            //QRTZ_TRIGGERS
                             getDelegate().updateTriggerState(conn, triggerKey, STATE_ERROR);
                         } catch (SQLException sqle) {
                             getLog().error("Unable to set trigger state to ERROR.", sqle);
                         }
                         continue;
                     }
-                    
+
                     if (job.isConcurrentExectionDisallowed()) {
                         if (acquiredJobKeysForNoConcurrentExec.contains(jobKey)) {
                             continue; // next trigger
@@ -2879,34 +2895,24 @@ public abstract class JobStoreSupport implements JobStore, Constants {
                             acquiredJobKeysForNoConcurrentExec.add(jobKey);
                         }
                     }
-
-                    Date nextFireTime = nextTrigger.getNextFireTime();
-
-                    // A trigger should not return NULL on nextFireTime when fetched from DB.
-                    // But for whatever reason if we do have this (BAD trigger implementation or
-                    // data?), we then should log a warning and continue to next trigger.
-                    // User would need to manually fix these triggers from DB as they will not
-                    // able to be clean up by Quartz since we are not returning it to be processed.
-                    if (nextFireTime == null) {
-                        log.warn("Trigger {} returned null on nextFireTime and yet still exists in DB!",
-                            nextTrigger.getKey());
-                        continue;
-                    }
                     
-                    if (nextFireTime.getTime() > batchEnd) {
+                    if (nextTrigger.getNextFireTime().getTime() > batchEnd) {
                       break;
                     }
                     // We now have a acquired trigger, let's add to return list.
                     // If our trigger was no longer in the expected state, try a new one.
+                    //QRTZ_TRIGGERS
                     int rowsUpdated = getDelegate().updateTriggerStateFromOtherState(conn, triggerKey, STATE_ACQUIRED, STATE_WAITING);
                     if (rowsUpdated <= 0) {
                         continue; // next trigger
                     }
                     nextTrigger.setFireInstanceId(getFiredTriggerRecordId());
+
+                    //INSERT INTO {0}FIRED_TRIGGERS (SCHED_NAME, ENTRY_ID, TRIGGER_NAME, TRIGGER_GROUP, INSTANCE_NAME, FIRED_TIME, SCHED_TIME, STATE, JOB_NAME, JOB_GROUP, IS_NONCONCURRENT, REQUESTS_RECOVERY, PRIORITY) VALUES({1}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     getDelegate().insertFiredTrigger(conn, nextTrigger, STATE_ACQUIRED, null);
 
                     if(acquiredTriggers.isEmpty()) {
-                        batchEnd = Math.max(nextFireTime.getTime(), System.currentTimeMillis()) + timeWindow;
+                        batchEnd = Math.max(nextTrigger.getNextFireTime().getTime(), System.currentTimeMillis()) + timeWindow;
                     }
                     acquiredTriggers.add(nextTrigger);
                 }
@@ -2952,8 +2958,6 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         try {
             getDelegate().updateTriggerStateFromOtherState(conn,
                     trigger.getKey(), STATE_WAITING, STATE_ACQUIRED);
-            getDelegate().updateTriggerStateFromOtherState(conn,
-                    trigger.getKey(), STATE_WAITING, STATE_BLOCKED);
             getDelegate().deleteFiredTrigger(conn, trigger.getFireInstanceId());
         } catch (SQLException e) {
             throw new JobPersistenceException(
@@ -3043,6 +3047,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         } catch (JobPersistenceException jpe) {
             try {
                 getLog().error("Error retrieving job, setting trigger state to ERROR.", jpe);
+                //QRTZ_TRIGGER
                 getDelegate().updateTriggerState(conn, trigger.getKey(),
                         STATE_ERROR);
             } catch (SQLException sqle) {
@@ -3057,15 +3062,18 @@ public abstract class JobStoreSupport implements JobStore, Constants {
         }
 
         try {
+            //更新FiredTrigger为正在执行状态，并更新一些job元数据
             getDelegate().updateFiredTrigger(conn, trigger, STATE_EXECUTING, job);
         } catch (SQLException e) {
             throw new JobPersistenceException("Couldn't insert fired trigger: "
                     + e.getMessage(), e);
         }
 
+
         Date prevFireTime = trigger.getPreviousFireTime();
 
         // call triggered - to update the trigger's next-fire-time state...
+        //计算新的nextFireTime，用于下次执行。
         trigger.triggered(cal);
 
         String state = STATE_WAITING;
@@ -3075,6 +3083,8 @@ public abstract class JobStoreSupport implements JobStore, Constants {
             state = STATE_BLOCKED;
             force = false;
             try {
+                //QRTZ_TRIGGER
+                //将所有Job相关的Trigger都改变为对应的BLOCKED状态
                 getDelegate().updateTriggerStatesForJobFromOtherState(conn, job.getKey(),
                         STATE_BLOCKED, STATE_WAITING);
                 getDelegate().updateTriggerStatesForJobFromOtherState(conn, job.getKey(),
@@ -3093,6 +3103,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
             force = true;
         }
 
+        //更新Trigger表中的数据(状态等信息)和相关实例表（如CronTrigger|SimpleTrigger）的数据
         storeTrigger(conn, trigger, job, true, state, force, false);
 
         job.getJobDataMap().clearDirtyFlag();
@@ -3130,10 +3141,11 @@ public abstract class JobStoreSupport implements JobStore, Constants {
                 if(trigger.getNextFireTime() == null) { 
                     // double check for possible reschedule within job 
                     // execution, which would cancel the need to delete...
+                    //select * from Trigger
                     TriggerStatus stat = getDelegate().selectTriggerStatus(
                             conn, trigger.getKey());
                     if(stat != null && stat.getNextFireTime() == null) {
-                        removeTrigger(conn, trigger.getKey());
+                        removeTrigger(conn, trigger.getKey());//delete from trigger
                     }
                 } else{
                     removeTrigger(conn, trigger.getKey());
@@ -3250,6 +3262,9 @@ public abstract class JobStoreSupport implements JobStore, Constants {
             // Before we make the potentially expensive call to acquire the 
             // trigger lock, peek ahead to see if it is likely we would find
             // misfired triggers requiring recovery.
+            //countMisfiredTriggersInSate from TABLE TRIGGER
+            //SELECT COUNT(TRIGGER_NAME) FROM {0}TRIGGERS WHERE SCHED_NAME = {1} AND NOT (MISFIRE_INSTR = -1) // -1:MISFIRE_INSTRUCTION_IGNORE_MISFIRE_POLICY
+            // AND NEXT_FIRE_TIME < ? AND TRIGGER_STATE = ?
             int misfireCount = (getDoubleCheckLockMisfireHandler()) ?
                 getDelegate().countMisfiredTriggersInState(
                     conn, STATE_WAITING, getMisfireTime()) : 
@@ -3474,6 +3489,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
 
             // check in...
             lastCheckin = System.currentTimeMillis();
+            //UPDATE {0}SCHEDULER_STATE SET LAST_CHECKIN_TIME = ? WHERE SCHED_NAME = {1} AND INSTANCE_NAME = ?
             if(getDelegate().updateSchedulerState(conn, getInstanceId(), lastCheckin) == 0) {
                 getDelegate().insertSchedulerState(conn, getInstanceId(),
                         lastCheckin, getClusterCheckinInterval());
@@ -3515,20 +3531,20 @@ public abstract class JobStoreSupport implements JobStore, Constants {
 
                     Set<TriggerKey> triggerKeys = new HashSet<TriggerKey>();
 
-                    for (FiredTriggerRecord ftRec : firedTriggerRecs) {
+                    for (FiredTriggerRecord firedTriggerRecord : firedTriggerRecs) {
 
-                        TriggerKey tKey = ftRec.getTriggerKey();
-                        JobKey jKey = ftRec.getJobKey();
+                        TriggerKey tKey = firedTriggerRecord.getTriggerKey();
+                        JobKey jKey = firedTriggerRecord.getJobKey();
 
                         triggerKeys.add(tKey);
 
                         // release blocked triggers..
-                        if (ftRec.getFireInstanceState().equals(STATE_BLOCKED)) {
+                        if (firedTriggerRecord.getFireInstanceState().equals(STATE_BLOCKED)) {
                             getDelegate()
                                     .updateTriggerStatesForJobFromOtherState(
                                             conn, jKey,
                                             STATE_WAITING, STATE_BLOCKED);
-                        } else if (ftRec.getFireInstanceState().equals(STATE_PAUSED_BLOCKED)) {
+                        } else if (firedTriggerRecord.getFireInstanceState().equals(STATE_PAUSED_BLOCKED)) {
                             getDelegate()
                                     .updateTriggerStatesForJobFromOtherState(
                                             conn, jKey,
@@ -3536,12 +3552,12 @@ public abstract class JobStoreSupport implements JobStore, Constants {
                         }
 
                         // release acquired triggers..
-                        if (ftRec.getFireInstanceState().equals(STATE_ACQUIRED)) {
+                        if (firedTriggerRecord.getFireInstanceState().equals(STATE_ACQUIRED)) {
                             getDelegate().updateTriggerStateFromOtherState(
                                     conn, tKey, STATE_WAITING,
                                     STATE_ACQUIRED);
                             acquiredCount++;
-                        } else if (ftRec.isJobRequestsRecovery()) {
+                        } else if (firedTriggerRecord.isJobRequestsRecovery()) {
                             // handle jobs marked for recovery that were not fully
                             // executed..
                             if (jobExists(conn, jKey)) {
@@ -3552,16 +3568,16 @@ public abstract class JobStoreSupport implements JobStore, Constants {
                                                 + "_"
                                                 + String.valueOf(recoverIds++),
                                         Scheduler.DEFAULT_RECOVERY_GROUP,
-                                        new Date(ftRec.getScheduleTimestamp()));
+                                        new Date(firedTriggerRecord.getScheduleTimestamp()));
                                 rcvryTrig.setJobName(jKey.getName());
                                 rcvryTrig.setJobGroup(jKey.getGroup());
                                 rcvryTrig.setMisfireInstruction(SimpleTrigger.MISFIRE_INSTRUCTION_IGNORE_MISFIRE_POLICY);
-                                rcvryTrig.setPriority(ftRec.getPriority());
+                                rcvryTrig.setPriority(firedTriggerRecord.getPriority());
                                 JobDataMap jd = getDelegate().selectTriggerJobDataMap(conn, tKey.getName(), tKey.getGroup());
                                 jd.put(Scheduler.FAILED_JOB_ORIGINAL_TRIGGER_NAME, tKey.getName());
                                 jd.put(Scheduler.FAILED_JOB_ORIGINAL_TRIGGER_GROUP, tKey.getGroup());
-                                jd.put(Scheduler.FAILED_JOB_ORIGINAL_TRIGGER_FIRETIME_IN_MILLISECONDS, String.valueOf(ftRec.getFireTimestamp()));
-                                jd.put(Scheduler.FAILED_JOB_ORIGINAL_TRIGGER_SCHEDULED_FIRETIME_IN_MILLISECONDS, String.valueOf(ftRec.getScheduleTimestamp()));
+                                jd.put(Scheduler.FAILED_JOB_ORIGINAL_TRIGGER_FIRETIME_IN_MILLISECONDS, String.valueOf(firedTriggerRecord.getFireTimestamp()));
+                                jd.put(Scheduler.FAILED_JOB_ORIGINAL_TRIGGER_SCHEDULED_FIRETIME_IN_MILLISECONDS, String.valueOf(firedTriggerRecord.getScheduleTimestamp()));
                                 rcvryTrig.setJobDataMap(jd);
 
                                 rcvryTrig.computeFirstFireTime(null);
@@ -3581,7 +3597,7 @@ public abstract class JobStoreSupport implements JobStore, Constants {
                         }
 
                         // free up stateful job's triggers
-                        if (ftRec.isJobDisallowsConcurrentExecution()) {
+                        if (firedTriggerRecord.isJobDisallowsConcurrentExecution()) {
                             getDelegate()
                                     .updateTriggerStatesForJobFromOtherState(
                                             conn, jKey,

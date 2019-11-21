@@ -487,6 +487,7 @@ public class SimpleTriggerImpl extends AbstractTrigger<SimpleTrigger> implements
             setNextFireTime(new Date());
         } else if (instr == MISFIRE_INSTRUCTION_RESCHEDULE_NEXT_WITH_EXISTING_COUNT) {
             Date newFireTime = getFireTimeAfter(new Date());
+            //根据日历，一直找到第一个复合条件的nextFireTimeAfter now
             while (newFireTime != null && cal != null
                     && !cal.isTimeIncluded(newFireTime.getTime())) {
                 newFireTime = getFireTimeAfter(newFireTime);
@@ -504,6 +505,7 @@ public class SimpleTriggerImpl extends AbstractTrigger<SimpleTrigger> implements
             setNextFireTime(newFireTime);
         } else if (instr == MISFIRE_INSTRUCTION_RESCHEDULE_NEXT_WITH_REMAINING_COUNT) {
             Date newFireTime = getFireTimeAfter(new Date());
+            //根据日历，一直找到第一个复合条件的nextFireTimeAfter now
             while (newFireTime != null && cal != null
                     && !cal.isTimeIncluded(newFireTime.getTime())) {
                 newFireTime = getFireTimeAfter(newFireTime);
@@ -519,19 +521,23 @@ public class SimpleTriggerImpl extends AbstractTrigger<SimpleTrigger> implements
                 }
             }
             if (newFireTime != null) {
-                int timesMissed = computeNumTimesFiredBetween(nextFireTime,
-                        newFireTime);
+                //计算被忽略的周期数
+                int timesMissed = computeNumTimesFiredBetween(nextFireTime, newFireTime);
                 setTimesTriggered(getTimesTriggered() + timesMissed);
             }
 
             setNextFireTime(newFireTime);
         } else if (instr == MISFIRE_INSTRUCTION_RESCHEDULE_NOW_WITH_EXISTING_REPEAT_COUNT) {
+            //设置nextFireTime=now 不管日历是否排除了改时间
             Date newFireTime = new Date();
+
+            //将剩余周期数设置为新的repeat总数， 已经执行数设置为0
             if (repeatCount != 0 && repeatCount != REPEAT_INDEFINITELY) {
                 setRepeatCount(getRepeatCount() - getTimesTriggered());
                 setTimesTriggered(0);
             }
-            
+
+            //如果过期了，则不执行了
             if (getEndTime() != null && getEndTime().before(newFireTime)) {
                 setNextFireTime(null); // We are past the end time
             } else {
@@ -539,6 +545,7 @@ public class SimpleTriggerImpl extends AbstractTrigger<SimpleTrigger> implements
                 setNextFireTime(newFireTime);
             } 
         } else if (instr == MISFIRE_INSTRUCTION_RESCHEDULE_NOW_WITH_REMAINING_REPEAT_COUNT) {
+            //设置nextFireTime=now 不管日历是否排除了改时间
             Date newFireTime = new Date();
 
             int timesMissed = computeNumTimesFiredBetween(nextFireTime,

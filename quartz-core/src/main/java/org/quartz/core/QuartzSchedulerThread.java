@@ -282,6 +282,7 @@ public class QuartzSchedulerThread extends Thread {
 
                     long now = System.currentTimeMillis();
 
+                    //这个signaled信号，在Cluster完成Recover或者JOB任务完成之后都会触发通知。
                     clearSignaledSchedulingChange();
                     try {
                         triggers = qsRsrcs.getJobStore().acquireNextTriggers(
@@ -318,6 +319,7 @@ public class QuartzSchedulerThread extends Thread {
                                 if (halted.get()) {
                                     break;
                                 }
+                                //第一次：检查是否需要释放当前Triggers,并重新拉取Trigger
                                 if (!isCandidateNewTimeEarlierWithinReason(triggerTime, false)) {
                                     try {
                                         // we could have blocked a long while
@@ -330,8 +332,10 @@ public class QuartzSchedulerThread extends Thread {
                                     }
                                 }
                             }
+                            //第二次检查一下看看是否需要释放Trigger，如果需要则释放(修改Triggers的状态为Waiting，删除Fired_Trigger表数据)
+                            //如果需要拉取新数据，会清空signal信号量
                             if(releaseIfScheduleChangedSignificantly(triggers, triggerTime)) {
-                                break;
+                                break;//执行下一次循环，重新拉取数据
                             }
                             now = System.currentTimeMillis();
                             timeUntilTrigger = triggerTime - now;
@@ -350,6 +354,7 @@ public class QuartzSchedulerThread extends Thread {
                         }
                         if(goAhead) {
                             try {
+                                //查询Trigger表，确保其状态为ACQUIRED,然后获取其Job信息
                                 List<TriggerFiredResult> res = qsRsrcs.getJobStore().triggersFired(triggers);
                                 if(res != null)
                                     bndles = res;
@@ -360,6 +365,7 @@ public class QuartzSchedulerThread extends Thread {
                                 //QTZ-179 : a problem occurred interacting with the triggers from the db
                                 //we release them and loop again
                                 for (int i = 0; i < triggers.size(); i++) {
+                                    //update triggers status = waiting(from acquired) and delete fired_triggers
                                     qsRsrcs.getJobStore().releaseAcquiredTrigger(triggers.get(i));
                                 }
                                 continue;
@@ -395,6 +401,7 @@ public class QuartzSchedulerThread extends Thread {
                                 continue;
                             }
 
+                            //execute job
                             if (qsRsrcs.getThreadPool().runInThread(shell) == false) {
                                 // this case should never happen, as it is indicative of the
                                 // scheduler being shutdown or a bug in the thread pool or
@@ -413,6 +420,8 @@ public class QuartzSchedulerThread extends Thread {
                     continue; // while (!halted)
                 }
 
+                
+                //随机睡眠一小段时间，实现负载均衡
                 long now = System.currentTimeMillis();
                 long waitTime = now + getRandomizedIdleWaitTime();
                 long timeUntilContinue = waitTime - now;
